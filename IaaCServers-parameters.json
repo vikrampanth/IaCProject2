@@ -1,0 +1,14 @@
+[
+    {
+        "ParameterKey": "EnvironmentName",
+        "ParameterValue": "IaaCProject"
+    },
+    {
+        "ParameterKey": "myAMI",
+        "ParameterValue": "ami-02701bcdc5509e57b"
+    },
+    {
+        "ParameterKey": "myInstanceType",
+        "ParameterValue": "t2.medium"
+    }
+]

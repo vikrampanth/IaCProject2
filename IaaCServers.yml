@@ -1,0 +1,243 @@
+Description: Vikram Panth/ Server setup
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that will be prefixed to resource name
+    Type: String
+
+  myAMI:
+    Description: EC2 AMI to use
+    Type: String
+
+  myInstanceType:
+    Description: EC2 Instance Type to use
+    Type: String
+
+Resources:
+
+  ALBSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB security group with Inbound & Outbound at 80 
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+
+  Ec2AppServerSecGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EC2 Security Group with Inbound 80 & ssh & unrestricted Outbound
+      VpcId:
+        Fn::ImportValue:
+          !Sub "${EnvironmentName}-VPCID"
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 80
+        ToPort: 80
+        CidrIp: 0.0.0.0/0
+      # Commented the SSH as per submission review comment
+      #- IpProtocol: tcp
+      #  FromPort: 22
+      #  ToPort: 22
+      #  CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+      - IpProtocol: -1
+        FromPort: -1
+        ToPort: -1
+        CidrIp: 0.0.0.0/0
+
+  UdacityS3ReadOnlyEC2:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      Description: User Role to Access EC2
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+          Action:
+          - 'sts:AssumeRole'
+      ManagedPolicyArns: 
+      - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+      # - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+  
+  ProfileWithRolesForOurApp:
+    Type: AWS::IAM::InstanceProfile
+    Properties: 
+      Roles:
+      - !Ref UdacityS3ReadOnlyEC2
+
+  Ec2AppServerLaunchConfig:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      LaunchConfigurationName: VP-IaaC-Launch-Config
+      ImageId: !Ref myAMI
+      IamInstanceProfile: !Ref ProfileWithRolesForOurApp
+      SecurityGroups: 
+      - Ref: Ec2AppServerSecGroup
+      InstanceType: !Ref myInstanceType
+      BlockDeviceMappings: 
+      - DeviceName: /dev/sdb
+        Ebs: 
+          VolumeSize: 10
+          VolumeType: "gp2"
+          DeleteOnTermination: "true"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          apt-get update -y
+          apt-get install unzip awscli -y
+          apt-get install apache2 -y
+          systemctl start apache2.service
+          cd /var/www/html
+          aws s3 cp s3://vp-iaac-project-udagram/index.zip .
+          unzip -o index.zip
+          aws s3 cp s3://vp-iaac-project-udagram/udacity.zip .
+          unzip -o udacity.zip
+
+  Ec2ServerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: 4
+      MaxSize: 4
+      DesiredCapacity: 4
+      LaunchConfigurationName: !Ref Ec2AppServerLaunchConfig
+      VPCZoneIdentifier: 
+      # Not expose outside via private subnet
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PRIV-NETS"
+      # To expose outside via public subnet
+      #- Fn::ImportValue: !Sub "${EnvironmentName}-PUB-NETS"
+      TargetGroupARNs:
+      - !Ref Ec2AppServerTargetGroup
+
+  myALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: VP-IaaC-Project-ALB
+      SecurityGroups: 
+      - !Ref ALBSecGroup
+      Subnets: 
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB1-SN"
+      - Fn::ImportValue: !Sub "${EnvironmentName}-PUB2-SN"
+      Tags: 
+      - Key: name
+        Value: !Sub ${EnvironmentName}-ASG
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties: 
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref Ec2AppServerTargetGroup
+      LoadBalancerArn: !Ref myALB
+      Port: 80
+      Protocol: HTTP
+
+  ALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref Ec2AppServerTargetGroup
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref ALBListener
+      Priority: 1
+
+  Ec2AppServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: 80
+      HealthCheckTimeoutSeconds: 8
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 5
+      Port: 80
+      Protocol: HTTP
+      VpcId: 
+        Fn::ImportValue: !Sub "${EnvironmentName}-VPCID"
+
+Outputs: 
+
+  ALBURL:
+    Description: Application Load Balance Access URL
+    Value: !Join
+    - ''
+    - - 'http://'
+      - !GetAtt
+        - myALB
+        - DNSName
+
+  ALBAnotherURL:
+    Description: Application Load Balance Access URL
+    Value: !Join
+    - ''
+    - - 'http://'
+      - !GetAtt
+        - myALB
+        - DNSName
+      - '/udacity/index.html'
+
+  ALBSecGroup: 
+      Description: A reference to the private subnet in the 2nd Availability Zone
+      Value: !Ref ALBSecGroup
+      Export:
+        Name: !Sub ${EnvironmentName}-ALB-SG
+
+  Ec2AppServerSecGroup: 
+      Description: A reference to the private subnet in the 2nd Availability Zone
+      Value: !Ref Ec2AppServerSecGroup
+      Export:
+        Name: !Sub ${EnvironmentName}-EC2-SG
+
+  RoleUdacityS3ReadOnlyEC2: 
+      Description: A reference to the private subnet in the 2nd Availability Zone
+      Value: !Ref UdacityS3ReadOnlyEC2
+      Export:
+        Name: !Sub ${EnvironmentName}-EC2-ROLE
+
+  Ec2AppServerLaunchConfig:
+      Description: A reference to the private subnet in the 2nd Availability Zone
+      Value: !Ref Ec2AppServerLaunchConfig
+      Export:
+        Name: !Sub ${EnvironmentName}-EC2-LC
+  
+  Ec2ServerAutoScalingGroup: 
+      Description: A reference to the private subnet in the 2nd Availability Zone
+      Value: !Ref Ec2ServerAutoScalingGroup
+      Export:
+        Name: !Sub ${EnvironmentName}-EC2-ASG
+
+  myALB: 
+      Description: A reference to the private subnet in the 2nd Availability Zone
+      Value: !Ref myALB
+      Export:
+        Name: !Sub ${EnvironmentName}-ALB
+
+  ALBListener: 
+      Description: A reference to the private subnet in the 2nd Availability Zone
+      Value: !Ref ALBListener
+      Export:
+        Name: !Sub ${EnvironmentName}-ALB-LIS
+
+  Ec2AppServerTargetGroup: 
+      Description: A reference to the private subnet in the 2nd Availability Zone
+      Value: !Ref Ec2AppServerTargetGroup
+      Export:
+        Name: !Sub ${EnvironmentName}-EC2-TG
